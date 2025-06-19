@@ -226,6 +226,7 @@ if is_peft_available():
 if is_accelerate_available():
     from accelerate import Accelerator, skip_first_batches
     from accelerate import __version__ as accelerate_version
+    from accelerate.scheduler import AcceleratedScheduler
     from accelerate.state import AcceleratorState
     from accelerate.utils import (
         AutocastKwargs,
@@ -271,6 +272,12 @@ def _get_fsdp_ckpt_kwargs():
         return {"adapter_only": True}
     else:
         return {}
+
+
+def _is_reduce_lr_on_plateau_scheduler(scheduler):
+    if isinstance(scheduler, AcceleratedScheduler):
+        scheduler = scheduler.scheduler
+    return isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
 
 
 def safe_globals():
@@ -2616,7 +2623,7 @@ class Trainer:
 
                         if not self.accelerator.optimizer_step_was_skipped:
                             # Delay optimizer scheduling until metrics are generated
-                            if not isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                            if not _is_reduce_lr_on_plateau_scheduler(self.lr_scheduler):
                                 self.lr_scheduler.step()
 
                         model.zero_grad()
@@ -3049,7 +3056,7 @@ class Trainer:
         self._report_to_hp_search(trial, self.state.global_step, metrics)
 
         # Run delayed LR scheduler now that metrics are populated
-        if isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau) and not skip_scheduler:
+        if _is_reduce_lr_on_plateau_scheduler(self.lr_scheduler) and not skip_scheduler:
             metric_to_check = self.args.metric_for_best_model
             if not metric_to_check.startswith("eval_"):
                 metric_to_check = f"eval_{metric_to_check}"
