@@ -559,9 +559,65 @@ class LlamaSdpaAttention(LlamaAttention):
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
+        # In case we are not compiling, we may set `causal_mask` to None, which is required to dispatch to SDPA's Flash Attention 2 backend, rather
+        # relying on the `is_causal` argument.
+
+        # NOTE (Moo Jin):
+        # We must set `is_causal` == False (to disable the default lower triangular causal mask) and `attn_mask` to the correct attention mask.
+        #
+        # This is a bit tricky given that we have pad tokens due to collation with samples of different lengths. If there weren't any pad tokens,
+        # we could just set `attn_mask` to all zeros, which represents a non-causal bi-directional mask (i.e. attend to all tokens). However,
+        # given that we have pad tokens, we need to actually mask out the pad tokens (i.e. set certain attention weights to negative infinity)
+        # so that we don't attend to pad tokens.
+        #
+        # The default causal mask logic produces a `causal_mask` where the lower triangle is all zeros if there are no pad tokens in the sample,
+        # and the rest of the elements are negative infinity.
+        # If there are K pad tokens in the sample, then the last K columns in `causal_mask` (which has shape (B, 1, seq_len, seq_len)) are
+        # additionally negative infinity.
+        # Example:
+        #
+        # No pad tokens:
+        #   0 -inf -inf
+        #   0   0  -inf
+        #   0   0    0
+        # 1 pad token:
+        #   0 -inf -inf
+        #   0   0  -inf
+        #   0   0  -inf
+        # 2 pad tokens:
+        #   0 -inf -inf
+        #   0 -inf -inf
+        #   0 -inf -inf
+        #
+        # Intuitively, this stops the last few tokens from attending to the last K tokens which are pad tokens.
+        #
+        # Okay so the above is what the default causal mask logic returns. But what we want is a mask that is all 0s except for the positions corresponding to pad tokens.
+        # What we want is illustrated below.
+        #
+        # No pad tokens:
+        #   0   0    0
+        #   0   0    0
+        #   0   0    0
+        # 1 pad token:
+        #   0   0  -inf
+        #   0   0  -inf
+        #   0   0  -inf
+        # 2 pad tokens:
+        #   0 -inf -inf
+        #   0 -inf -inf
+        #   0 -inf -inf
+        #
+        # Trick: To get this mask, we just take the last row of the old `causal_mask` and duplicate it all the way through to get the new mask. You can see that this trick
+        # works by looking at the matrices above.
+        if causal_mask is not None:
+            D = causal_mask.shape[-1]
+            last_row = causal_mask[:, :, -1, :].clone()
+            new_mask = last_row.unsqueeze(2).expand(-1, -1, D, -1)
+            causal_mask = new_mask
+
         # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-        is_causal = True if causal_mask is None and q_len > 1 else False
+        is_causal = False
 
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             query_states,
