@@ -609,11 +609,11 @@ class LlamaSdpaAttention(LlamaAttention):
         #
         # Trick: To get this mask, we just take the last row of the old `causal_mask` and duplicate it all the way through to get the new mask. You can see that this trick
         # works by looking at the matrices above.
-        if causal_mask is not None:
-            D = causal_mask.shape[-1]
-            last_row = causal_mask[:, :, -1, :].clone()
-            new_mask = last_row.unsqueeze(2).expand(-1, -1, D, -1)
-            causal_mask = new_mask
+        # if causal_mask is not None:
+        #     D = causal_mask.shape[-1]
+        #     last_row = causal_mask[:, :, -1, :].clone()
+        #     new_mask = last_row.unsqueeze(2).expand(-1, -1, D, -1)
+        #     causal_mask = new_mask
 
         # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
@@ -893,6 +893,7 @@ class LlamaModel(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        action_token_mask: Optional[torch.Tensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -939,6 +940,9 @@ class LlamaModel(LlamaPreTrainedModel):
         causal_mask = self._update_causal_mask(
             attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
         )
+
+        last_row = causal_mask[:, :, -1:, :].clone()
+        causal_mask = torch.where(action_token_mask.unsqueeze(1), last_row, causal_mask)
         hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
@@ -1025,14 +1029,14 @@ class LlamaModel(LlamaPreTrainedModel):
         using_static_cache = isinstance(past_key_values, StaticCache)
 
         # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
-        if self.config._attn_implementation == "sdpa" and not using_static_cache and not output_attentions:
-            if AttentionMaskConverter._ignore_causal_mask_sdpa(
-                attention_mask,
-                inputs_embeds=input_tensor,
-                past_key_values_length=past_seen_tokens,
-                is_training=self.training,
-            ):
-                return None
+        # if self.config._attn_implementation == "sdpa" and not using_static_cache and not output_attentions:
+        #     if AttentionMaskConverter._ignore_causal_mask_sdpa(
+        #         attention_mask,
+        #         inputs_embeds=input_tensor,
+        #         past_key_values_length=past_seen_tokens,
+        #         is_training=self.training,
+        #     ):
+        #         return None
 
         dtype, device = input_tensor.dtype, input_tensor.device
         sequence_length = input_tensor.shape[1]
