@@ -942,7 +942,10 @@ class LlamaModel(LlamaPreTrainedModel):
         )
 
         last_row = causal_mask[:, :, -1:, :].clone()
-        causal_mask = torch.where(action_token_mask.unsqueeze(1), last_row, causal_mask)
+        if action_token_mask is None:
+            causal_mask = last_row.expand(-1, -1, causal_mask.shape[-1], -1)
+        else:
+            causal_mask = torch.where(action_token_mask.unsqueeze(1), last_row, causal_mask)
         hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
